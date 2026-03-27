@@ -360,6 +360,29 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'restart_host',
+  'Restart the NanoClaw host process. Main group only. Use when configuration changes need to take effect or when something is stuck.',
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can restart the host.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'restart',
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: 'Host restart requested. You will be disconnected momentarily.' }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

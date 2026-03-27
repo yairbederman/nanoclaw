@@ -119,6 +119,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add claudemd_hash column to sessions (for auto-invalidation on CLAUDE.md change)
+  try {
+    database.exec(
+      `ALTER TABLE sessions ADD COLUMN claudemd_hash TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -520,10 +529,31 @@ export function getSession(groupFolder: string): string | undefined {
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+export function setSession(
+  groupFolder: string,
+  sessionId: string,
+  claudemdHash?: string,
+): void {
+  if (claudemdHash) {
+    db.prepare(
+      'INSERT OR REPLACE INTO sessions (group_folder, session_id, claudemd_hash) VALUES (?, ?, ?)',
+    ).run(groupFolder, sessionId, claudemdHash);
+  } else {
+    db.prepare(
+      'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
+    ).run(groupFolder, sessionId);
+  }
+}
+
+export function getSessionHash(groupFolder: string): string | undefined {
+  const row = db
+    .prepare('SELECT claudemd_hash FROM sessions WHERE group_folder = ?')
+    .get(groupFolder) as { claudemd_hash: string | null } | undefined;
+  return row?.claudemd_hash ?? undefined;
+}
+
+export function clearSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
 export function getAllSessions(): Record<string, string> {

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -38,6 +39,8 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
+  clearSession,
+  getSessionHash,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -272,7 +275,30 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Auto-invalidate session when CLAUDE.md changes — prevents compacted
+  // context from overriding updated instructions.
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
+  if (sessionId && fs.existsSync(claudeMdPath)) {
+    const content = fs.readFileSync(claudeMdPath, 'utf-8');
+    const currentHash = crypto
+      .createHash('sha256')
+      .update(content)
+      .digest('hex')
+      .slice(0, 16);
+    const storedHash = getSessionHash(group.folder);
+    if (storedHash && storedHash !== currentHash) {
+      logger.info(
+        { group: group.name, oldHash: storedHash, newHash: currentHash },
+        'CLAUDE.md changed, invalidating session',
+      );
+      clearSession(group.folder);
+      delete sessions[group.folder];
+      sessionId = undefined;
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -299,12 +325,23 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  // Compute CLAUDE.md hash for storing alongside new sessions
+  let claudeMdHash: string | undefined;
+  if (fs.existsSync(claudeMdPath)) {
+    const content = fs.readFileSync(claudeMdPath, 'utf-8');
+    claudeMdHash = crypto
+      .createHash('sha256')
+      .update(content)
+      .digest('hex')
+      .slice(0, 16);
+  }
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          setSession(group.folder, output.newSessionId, claudeMdHash);
         }
         await onOutput(output);
       }
@@ -328,7 +365,7 @@ async function runAgent(
 
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      setSession(group.folder, output.newSessionId, claudeMdHash);
     }
 
     if (output.status === 'error') {

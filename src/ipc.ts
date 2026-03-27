@@ -478,6 +478,17 @@ export async function processTaskIpc(
       runScheduledTask(data.taskName, data.replyJid, deps.sendMessage);
       break;
 
+    case 'restart':
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized restart attempt blocked');
+        break;
+      }
+      logger.info({ sourceGroup }, 'Restart requested via IPC, exiting');
+      // Exit with code 0 — the service manager (run-beedo.ps1, launchd, systemd)
+      // will restart the process automatically.
+      setTimeout(() => process.exit(0), 1000);
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
@@ -514,7 +525,10 @@ function runScheduledTask(
       if (fs.existsSync(resolved)) {
         taskCwd = resolved;
       } else {
-        logger.warn({ taskName, cwd: cwdField[1] }, 'Task cwd does not exist, using default');
+        logger.warn(
+          { taskName, cwd: cwdField[1] },
+          'Task cwd does not exist, using default',
+        );
       }
     }
   }

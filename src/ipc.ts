@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -9,6 +10,19 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+
+const SCHEDULED_TASKS_DIR = path.join(
+  process.env.USERPROFILE || process.env.HOME || '',
+  '.claude',
+  'scheduled-tasks',
+);
+
+const CLAUDE_CLI = path.join(
+  process.env.USERPROFILE || process.env.HOME || '',
+  '.local',
+  'bin',
+  'claude',
+);
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -171,6 +185,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For run_task
+    taskName?: string;
+    replyJid?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -449,7 +466,95 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'run_task':
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized run_task attempt blocked');
+        break;
+      }
+      if (!data.taskName || !data.replyJid) {
+        logger.warn({ data }, 'run_task missing taskName or replyJid');
+        break;
+      }
+      runScheduledTask(data.taskName, data.replyJid, deps.sendMessage);
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+function runScheduledTask(
+  taskName: string,
+  replyJid: string,
+  sendMessage: (jid: string, text: string) => Promise<void>,
+): void {
+  const taskDir = path.join(SCHEDULED_TASKS_DIR, taskName);
+  const skillPath = path.join(taskDir, 'SKILL.md');
+
+  if (!fs.existsSync(skillPath)) {
+    const available = fs.existsSync(SCHEDULED_TASKS_DIR)
+      ? fs.readdirSync(SCHEDULED_TASKS_DIR).join(', ')
+      : 'none';
+    sendMessage(
+      replyJid,
+      `Task "${taskName}" not found. Available: ${available}`,
+    ).catch(() => {});
+    return;
+  }
+
+  const raw = fs.readFileSync(skillPath, 'utf-8');
+
+  // Parse cwd from frontmatter before stripping (e.g. "cwd: C:/Projects/Foo")
+  let taskCwd = process.cwd();
+  const cwdMatch = raw.match(/^---[\r\n][\s\S]*?[\r\n]---/);
+  if (cwdMatch) {
+    const cwdField = cwdMatch[0].match(/^cwd:\s*(.+)$/m);
+    if (cwdField) {
+      const resolved = path.resolve(cwdField[1].trim());
+      if (fs.existsSync(resolved)) {
+        taskCwd = resolved;
+      } else {
+        logger.warn({ taskName, cwd: cwdField[1] }, 'Task cwd does not exist, using default');
+      }
+    }
+  }
+
+  // Strip ALL leading YAML frontmatter blocks — the leading '---' confuses
+  // the CLI arg parser into treating the prompt as an unknown option flag.
+  let prompt = raw;
+  while (prompt.startsWith('---\n') || prompt.startsWith('---\r\n')) {
+    prompt = prompt.replace(/^---[\r\n][\s\S]*?[\r\n]---[\r\n]*/, '');
+  }
+  logger.info({ taskName, cwd: taskCwd }, 'Running scheduled task via CLI');
+  sendMessage(
+    replyJid,
+    `Running *${taskName}*... I'll update you when done.`,
+  ).catch(() => {});
+
+  const proc = spawn(
+    CLAUDE_CLI,
+    ['--print', '--dangerously-skip-permissions', '-p', prompt],
+    {
+      cwd: taskCwd,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+
+  let output = '';
+  proc.stdout.on('data', (d: Buffer) => {
+    output += d.toString();
+  });
+  proc.stderr.on('data', (d: Buffer) => {
+    output += d.toString();
+  });
+
+  proc.on('close', (code: number) => {
+    const summary = output.slice(-1000).trim() || '(no output)';
+    const status = code === 0 ? '✅ Done' : `❌ Failed (exit ${code})`;
+    sendMessage(replyJid, `${status}: *${taskName}*\n\n${summary}`).catch(
+      () => {},
+    );
+    logger.info({ taskName, code }, 'Scheduled task finished');
+  });
 }

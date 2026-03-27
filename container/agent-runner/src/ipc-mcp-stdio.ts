@@ -248,6 +248,33 @@ server.tool(
 );
 
 server.tool(
+  'run_task',
+  'Run a scheduled task immediately on demand. Use this when the user asks to run a task by name.',
+  {
+    task_name: z.string().describe('The task name to run (e.g., "li-post-scout", "li-post-publish")'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can trigger tasks.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'run_task',
+      taskName: args.task_name,
+      replyJid: chatJid,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Task "${args.task_name}" triggered. Result will be sent here when done.` }] };
+  },
+);
+
+server.tool(
   'update_task',
   'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
   {

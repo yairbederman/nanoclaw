@@ -128,9 +128,7 @@ function createSchema(database: Database.Database): void {
 
   // Add claudemd_hash column to sessions (for auto-invalidation on CLAUDE.md change)
   try {
-    database.exec(
-      `ALTER TABLE sessions ADD COLUMN claudemd_hash TEXT`,
-    );
+    database.exec(`ALTER TABLE sessions ADD COLUMN claudemd_hash TEXT`);
   } catch {
     /* column already exists */
   }

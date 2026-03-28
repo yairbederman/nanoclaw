@@ -1,54 +1,68 @@
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { WAMessage, WASocket } from '@whiskeysockets/baileys';
+import { execFile } from 'child_process';
+import { writeFile, unlink, mkdir } from 'fs/promises';
+import path from 'path';
+import { promisify } from 'util';
 
-import { readEnvFile } from './env.js';
+import { logger } from './logger.js';
+
+const execFileAsync = promisify(execFile);
 
 interface TranscriptionConfig {
-  model: string;
   enabled: boolean;
   fallbackMessage: string;
 }
 
 const DEFAULT_CONFIG: TranscriptionConfig = {
-  model: 'whisper-1',
   enabled: true,
   fallbackMessage: '[Voice Message - transcription unavailable]',
 };
 
-async function transcribeWithOpenAI(
-  audioBuffer: Buffer,
-  config: TranscriptionConfig,
-): Promise<string | null> {
-  const env = readEnvFile(['OPENAI_API_KEY']);
-  const apiKey = env.OPENAI_API_KEY;
+const WHISPER_DIR = path.join(
+  path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Z]:)/, '$1'),
+  '..',
+  'vendor',
+  'whisper',
+);
+const WHISPER_CLI = path.join(WHISPER_DIR, 'Release', 'whisper-cli.exe');
+const WHISPER_MODEL = path.join(WHISPER_DIR, 'ggml-small.bin');
+const TEMP_DIR = path.join(WHISPER_DIR, 'tmp');
+const FFMPEG = process.env.FFMPEG_PATH || 'C:\\Users\\YAIR\\AppData\\Local\\Microsoft\\WinGet\\Links\\ffmpeg.exe';
 
-  if (!apiKey) {
-    console.warn('OPENAI_API_KEY not set in .env');
-    return null;
-  }
+async function transcribeWithWhisperCpp(
+  audioBuffer: Buffer,
+): Promise<string | null> {
+  const tempFile = path.join(
+    TEMP_DIR,
+    `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`,
+  );
+
+  const wavFile = tempFile.replace('.ogg', '.wav');
 
   try {
-    const openaiModule = await import('openai');
-    const OpenAI = openaiModule.default;
-    const toFile = openaiModule.toFile;
+    await mkdir(TEMP_DIR, { recursive: true });
+    await writeFile(tempFile, audioBuffer);
 
-    const openai = new OpenAI({ apiKey });
+    // Convert OGG/Opus to 16kHz mono WAV — whisper.cpp can't decode OGG directly
+    await execFileAsync(FFMPEG, [
+      '-i', tempFile, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavFile, '-y',
+    ]);
 
-    const file = await toFile(audioBuffer, 'voice.ogg', {
-      type: 'audio/ogg',
-    });
+    const { stdout } = await execFileAsync(
+      WHISPER_CLI,
+      ['-m', WHISPER_MODEL, '-f', wavFile, '--no-timestamps', '-nt', '-l', 'auto'],
+      { timeout: 60_000 },
+    );
 
-    const transcription = await openai.audio.transcriptions.create({
-      file: file,
-      model: config.model,
-      response_format: 'text',
-    });
-
-    // When response_format is 'text', the API returns a plain string
-    return transcription as unknown as string;
+    const text = stdout.trim();
+    return text || null;
   } catch (err) {
-    console.error('OpenAI transcription failed:', err);
+    logger.error({ err }, 'whisper.cpp transcription failed');
     return null;
+  } finally {
+    await unlink(tempFile).catch(() => {});
+    await unlink(wavFile).catch(() => {});
   }
 }
 
@@ -74,21 +88,24 @@ export async function transcribeAudioMessage(
     )) as Buffer;
 
     if (!buffer || buffer.length === 0) {
-      console.error('Failed to download audio message');
+      logger.error('Failed to download audio message');
       return config.fallbackMessage;
     }
 
-    console.log(`Downloaded audio message: ${buffer.length} bytes`);
+    logger.info(`Downloaded audio message: ${buffer.length} bytes`);
 
-    const transcript = await transcribeWithOpenAI(buffer, config);
+    const transcript = await transcribeWithWhisperCpp(buffer);
 
     if (!transcript) {
       return config.fallbackMessage;
     }
 
+    logger.info(
+      `Transcribed voice message: ${transcript.length} characters`,
+    );
     return transcript.trim();
   } catch (err) {
-    console.error('Transcription error:', err);
+    logger.error({ err }, 'Transcription error');
     return config.fallbackMessage;
   }
 }

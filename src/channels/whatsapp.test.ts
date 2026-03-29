@@ -32,14 +32,6 @@ vi.mock('../db.js', () => ({
   updateChatName: vi.fn(),
 }));
 
-// Mock transcription
-vi.mock('../transcription.js', () => ({
-  isVoiceMessage: vi.fn((msg: any) => msg.message?.audioMessage?.ptt === true),
-  transcribeAudioMessage: vi
-    .fn()
-    .mockResolvedValue('Hello this is a voice message'),
-}));
-
 // Mock fs
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -114,8 +106,6 @@ vi.mock('@whiskeysockets/baileys', () => {
 
 import { WhatsAppChannel, WhatsAppChannelOpts } from './whatsapp.js';
 import { getLastGroupSync, updateChatName, setLastGroupSync } from '../db.js';
-import { transcribeAudioMessage } from '../transcription.js';
-
 // --- Test helpers ---
 
 function createTestOpts(
@@ -516,125 +506,6 @@ describe('WhatsAppChannel', () => {
         'registered@g.us',
         expect.objectContaining({ content: 'Watch this' }),
       );
-    });
-
-    it('stores voice messages without transcription in non-main groups', async () => {
-      const opts = createTestOpts();
-      const channel = new WhatsAppChannel(opts);
-
-      await connectChannel(channel);
-
-      await triggerMessages([
-        {
-          key: {
-            id: 'msg-8',
-            remoteJid: 'registered@g.us',
-            participant: '5551234@s.whatsapp.net',
-            fromMe: false,
-          },
-          message: {
-            audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true },
-          },
-          pushName: 'Frank',
-          messageTimestamp: Math.floor(Date.now() / 1000),
-        },
-      ]);
-
-      expect(transcribeAudioMessage).not.toHaveBeenCalled();
-      expect(opts.onMessage).toHaveBeenCalledTimes(1);
-      expect(opts.onMessage).toHaveBeenCalledWith(
-        'registered@g.us',
-        expect.objectContaining({
-          content: '[Voice Message]',
-        }),
-      );
-    });
-
-    it('auto-transcribes voice messages in main group', async () => {
-      const opts = createTestOpts({
-        registeredGroups: vi.fn(() => ({
-          'registered@g.us': {
-            name: 'Main Chat',
-            folder: 'whatsapp_main',
-            trigger: '@Andy',
-            added_at: '2024-01-01T00:00:00.000Z',
-            isMain: true,
-          },
-        })),
-      });
-      const channel = new WhatsAppChannel(opts);
-
-      await connectChannel(channel);
-
-      await triggerMessages([
-        {
-          key: {
-            id: 'msg-8b',
-            remoteJid: 'registered@g.us',
-            participant: '5551234@s.whatsapp.net',
-            fromMe: false,
-          },
-          message: {
-            audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true },
-          },
-          pushName: 'Frank',
-          messageTimestamp: Math.floor(Date.now() / 1000),
-        },
-      ]);
-
-      expect(transcribeAudioMessage).toHaveBeenCalled();
-      expect(opts.onMessage).toHaveBeenCalledTimes(1);
-      expect(opts.onMessage).toHaveBeenCalledWith(
-        'registered@g.us',
-        expect.objectContaining({
-          content: '[Voice: Hello this is a voice message]',
-        }),
-      );
-    });
-
-    it('transcribes on-demand when replying to voice note with trigger', async () => {
-      const opts = createTestOpts();
-      const channel = new WhatsAppChannel(opts);
-
-      await connectChannel(channel);
-
-      await triggerMessages([
-        {
-          key: {
-            id: 'msg-8c',
-            remoteJid: 'registered@g.us',
-            participant: '5551234@s.whatsapp.net',
-            fromMe: false,
-          },
-          message: {
-            extendedTextMessage: {
-              text: '@Andy',
-              contextInfo: {
-                stanzaId: 'original-voice-id',
-                participant: '5559999@s.whatsapp.net',
-                quotedMessage: {
-                  audioMessage: {
-                    mimetype: 'audio/ogg; codecs=opus',
-                    ptt: true,
-                  },
-                },
-              },
-            },
-          },
-          pushName: 'Frank',
-          messageTimestamp: Math.floor(Date.now() / 1000),
-        },
-      ]);
-
-      expect(transcribeAudioMessage).toHaveBeenCalled();
-      expect(fakeSocket.sendMessage).toHaveBeenCalledWith(
-        'registered@g.us',
-        expect.objectContaining({
-          text: expect.stringContaining('📝'),
-        }),
-      );
-      // On-demand transcription skips agent
-      expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
     it('uses sender JID when pushName is absent', async () => {

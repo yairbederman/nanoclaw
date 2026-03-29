@@ -5,7 +5,6 @@ import path from 'path';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  WAMessage,
   WASocket,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
@@ -20,7 +19,6 @@ import {
 } from '../config.js';
 import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
 import { logger } from '../logger.js';
-import { isVoiceMessage, transcribeAudioMessage } from '../transcription.js';
 import {
   Channel,
   OnInboundMessage,
@@ -216,57 +214,10 @@ export class WhatsAppChannel implements Channel {
             '';
 
           // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
-          // but allow voice messages and audio files through for transcription
-          const hasAudio = !!msg.message?.audioMessage;
-          if (!content && !isVoiceMessage(msg) && !hasAudio) continue;
+          if (!content) continue;
 
           const group = groups[chatJid];
           const isMain = group.isMain === true;
-
-          // On-demand transcription: reply to a voice note with @beedo in a non-main group
-          const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-          const quotedAudio = contextInfo?.quotedMessage?.audioMessage;
-          if (
-            !isMain &&
-            quotedAudio?.ptt === true &&
-            content &&
-            getTriggerPattern(group.trigger).test(content.trim())
-          ) {
-            const quotedMsg = {
-              key: {
-                remoteJid: chatJid,
-                id: contextInfo!.stanzaId || '',
-                participant: contextInfo!.participant || '',
-              },
-              message: contextInfo!.quotedMessage!,
-            } as WAMessage;
-
-            try {
-              const transcript = await transcribeAudioMessage(
-                quotedMsg,
-                this.sock,
-              );
-              if (transcript) {
-                logger.info(
-                  { chatJid, length: transcript.length },
-                  'On-demand voice transcription',
-                );
-                await this.sendMessage(chatJid, `📝 ${transcript}`);
-              } else {
-                await this.sendMessage(
-                  chatJid,
-                  '[Voice Message - transcription unavailable]',
-                );
-              }
-            } catch (err) {
-              logger.error({ err }, 'On-demand voice transcription error');
-              await this.sendMessage(
-                chatJid,
-                '[Voice Message - transcription failed]',
-              );
-            }
-            continue;
-          }
 
           const sender = msg.key.participant || msg.key.remoteJid || '';
           const senderName = msg.pushName || sender.split('@')[0];
@@ -280,53 +231,12 @@ export class WhatsAppChannel implements Channel {
             ? fromMe
             : content.startsWith(`${ASSISTANT_NAME}:`);
 
-          // Transcribe voice/audio messages before storing
-          let finalContent = content;
-          if (isVoiceMessage(msg) || hasAudio) {
-            if (isMain) {
-              // Main/personal chat: auto-transcribe as before
-              const isForwarded =
-                msg.message?.audioMessage?.contextInfo?.isForwarded === true;
-
-              try {
-                const transcript = await transcribeAudioMessage(
-                  msg,
-                  this.sock,
-                );
-                if (transcript) {
-                  if (isForwarded) {
-                    // Forwarded voice notes: return transcription directly, skip agent
-                    logger.info(
-                      { chatJid, length: transcript.length },
-                      'Forwarded voice message — transcription only',
-                    );
-                    await this.sendMessage(chatJid, `📝 ${transcript}`);
-                    continue;
-                  }
-                  finalContent = `[Voice: ${transcript}]`;
-                  logger.info(
-                    { chatJid, length: transcript.length },
-                    'Transcribed voice message',
-                  );
-                } else {
-                  finalContent = '[Voice Message - transcription unavailable]';
-                }
-              } catch (err) {
-                logger.error({ err }, 'Voice transcription error');
-                finalContent = '[Voice Message - transcription failed]';
-              }
-            } else {
-              // Non-main groups: no auto-transcription, use @beedo reply to trigger
-              finalContent = '[Voice Message]';
-            }
-          }
-
           this.opts.onMessage(chatJid, {
             id: msg.key.id || '',
             chat_jid: chatJid,
             sender,
             sender_name: senderName,
-            content: finalContent,
+            content: content,
             timestamp,
             is_from_me: fromMe,
             is_bot_message: isBotMessage,

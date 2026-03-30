@@ -61,6 +61,9 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+/** Non-zero exit code that signals "restart me" to the service manager.
+ *  Distinct from 1 (crash) and 0 (intentional stop). */
+export const RESTART_EXIT_CODE = 75;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,

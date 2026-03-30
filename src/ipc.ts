@@ -4,7 +4,12 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  DATA_DIR,
+  IPC_POLL_INTERVAL,
+  RESTART_EXIT_CODE,
+  TIMEZONE,
+} from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -497,9 +502,9 @@ export async function processTaskIpc(
         break;
       }
       logger.info({ sourceGroup }, 'Restart requested via IPC, exiting');
-      // Exit with code 0 — the service manager (run-beedo.ps1, launchd, systemd)
-      // will restart the process automatically.
-      setTimeout(() => process.exit(0), 1000);
+      // Exit with RESTART_EXIT_CODE — non-zero so Windows Task Scheduler
+      // RestartOnFailure kicks in (exit 0 is treated as "success").
+      setTimeout(() => process.exit(RESTART_EXIT_CODE), 1000);
       break;
 
     default:

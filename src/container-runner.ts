@@ -81,8 +81,11 @@ function buildVolumeMounts(
     // Credentials are injected by the credential proxy, never exposed to containers.
     const envFile = path.join(projectRoot, '.env');
     if (fs.existsSync(envFile)) {
+      // /dev/null doesn't work as a Docker mount on Windows — use an empty file instead
+      const shadowEnv = path.join(DATA_DIR, '.env-shadow');
+      if (!fs.existsSync(shadowEnv)) fs.writeFileSync(shadowEnv, '');
       mounts.push({
-        hostPath: '/dev/null',
+        hostPath: shadowEnv,
         containerPath: '/workspace/project/.env',
         readonly: true,
       });

@@ -52,6 +52,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { removePidFile, writePidFile } from './pid.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -560,6 +561,9 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  writePidFile();
+  process.on('exit', removePidFile);
+
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');

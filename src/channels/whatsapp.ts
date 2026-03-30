@@ -2,6 +2,8 @@ import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { RESTART_EXIT_CODE } from '../config.js';
+
 import makeWASocket, {
   Browsers,
   DisconnectReason,
@@ -130,7 +132,7 @@ export class WhatsAppChannel implements Channel {
           });
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
-          process.exit(0);
+          process.exit(RESTART_EXIT_CODE);
         }
       } else if (connection === 'open') {
         this.connected = true;

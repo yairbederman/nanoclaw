@@ -65,6 +65,10 @@ export const IPC_POLL_INTERVAL = 1000;
  *  Distinct from 1 (crash) and 0 (intentional stop). */
 export const RESTART_EXIT_CODE = 75;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+/** How often the watchdog checks the message loop heartbeat (ms). */
+export const HEARTBEAT_CHECK_INTERVAL = 60_000; // 60s
+/** Max time since last heartbeat before the watchdog triggers a restart (ms). */
+export const HEARTBEAT_STALE_THRESHOLD = 300_000; // 5min
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,

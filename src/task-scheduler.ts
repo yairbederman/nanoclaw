@@ -100,7 +100,10 @@ async function runTask(
       error,
     });
     try {
-      await deps.sendMessage(task.chat_jid, `[Task] Paused: "${task.prompt.slice(0, 50)}..." — ${error}`);
+      await deps.sendMessage(
+        task.chat_jid,
+        `[Task] Paused: "${task.prompt.slice(0, 50)}..." — ${error}`,
+      );
     } catch {}
     return;
   }
@@ -130,7 +133,10 @@ async function runTask(
       error: `Group not found: ${task.group_folder}`,
     });
     try {
-      await deps.sendMessage(task.chat_jid, `[Task] Failed: "${task.prompt.slice(0, 50)}..." — Group not found: ${task.group_folder}`);
+      await deps.sendMessage(
+        task.chat_jid,
+        `[Task] Failed: "${task.prompt.slice(0, 50)}..." — Group not found: ${task.group_folder}`,
+      );
     } catch {}
     return;
   }
@@ -239,9 +245,15 @@ async function runTask(
 
   const truncatedPrompt = task.prompt.slice(0, 50);
   if (error) {
-    await deps.sendMessage(task.chat_jid, `[Task] Failed: "${truncatedPrompt}..." — ${error}`);
+    await deps.sendMessage(
+      task.chat_jid,
+      `[Task] Failed: "${truncatedPrompt}..." — ${error}`,
+    );
   } else if (!result) {
-    await deps.sendMessage(task.chat_jid, `[Task] Completed: "${truncatedPrompt}..." (no output)`);
+    await deps.sendMessage(
+      task.chat_jid,
+      `[Task] Completed: "${truncatedPrompt}..." (no output)`,
+    );
   }
 
   const nextRun = computeNextRun(task);

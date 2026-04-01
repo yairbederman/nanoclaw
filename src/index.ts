@@ -8,9 +8,12 @@ import {
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
+  HEARTBEAT_CHECK_INTERVAL,
+  HEARTBEAT_STALE_THRESHOLD,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
+  RESTART_EXIT_CODE,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
@@ -76,6 +79,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+let lastHeartbeat = 0;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -436,6 +440,20 @@ async function startMessageLoop(): Promise<void> {
     return;
   }
   messageLoopRunning = true;
+  lastHeartbeat = Date.now();
+
+  // Watchdog: detect message loop stalls and force restart
+  const watchdog = setInterval(() => {
+    const staleness = Date.now() - lastHeartbeat;
+    if (staleness > HEARTBEAT_STALE_THRESHOLD) {
+      logger.fatal(
+        { staleness, threshold: HEARTBEAT_STALE_THRESHOLD },
+        'Message loop heartbeat stale, forcing restart',
+      );
+      process.exit(RESTART_EXIT_CODE);
+    }
+  }, HEARTBEAT_CHECK_INTERVAL);
+  watchdog.unref();
 
   logger.info(`NanoClaw running (default trigger: ${DEFAULT_TRIGGER})`);
 
@@ -530,6 +548,7 @@ async function startMessageLoop(): Promise<void> {
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    lastHeartbeat = Date.now();
   }
 }
 

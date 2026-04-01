@@ -58,6 +58,9 @@ function createFakeSocket() {
       on: (event: string, handler: (...args: unknown[]) => void) => {
         ev.on(event, handler);
       },
+      removeAllListeners: (event: string) => {
+        ev.removeAllListeners(event);
+      },
     },
     user: {
       id: '1234567890:1@s.whatsapp.net',

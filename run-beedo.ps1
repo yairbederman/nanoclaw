@@ -31,10 +31,20 @@ while ($true) {
     $attempt++
     Write-Host "[run-beedo] Starting Beedo (attempt $attempt, backoff ${backoff}s)..."
 
+    # Rotate logs if over 50MB
+    $logFile = "C:\Users\YAIR\nanoclaw\logs\nanoclaw.log"
+    $errLogFile = "C:\Users\YAIR\nanoclaw\logs\nanoclaw.error.log"
+    if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 50MB)) {
+        Move-Item $logFile "$logFile.old" -Force
+    }
+    if ((Test-Path $errLogFile) -and ((Get-Item $errLogFile).Length -gt 50MB)) {
+        Move-Item $errLogFile "$errLogFile.old" -Force
+    }
+
     $startTime = Get-Date
 
-    & "C:\Program Files\nodejs\node.exe" "C:\Users\YAIR\nanoclaw\dist\index.js" `
-        >> "C:\Users\YAIR\nanoclaw\logs\nanoclaw.log" 2>> "C:\Users\YAIR\nanoclaw\logs\nanoclaw.error.log"
+    # Use cmd /c for redirect — PowerShell >> writes UTF-16LE, cmd >> preserves UTF-8
+    cmd /c "`"C:\Program Files\nodejs\node.exe`" `"C:\Users\YAIR\nanoclaw\dist\index.js`" >> `"C:\Users\YAIR\nanoclaw\logs\nanoclaw.log`" 2>> `"C:\Users\YAIR\nanoclaw\logs\nanoclaw.error.log`""
 
     $exitCode = $LASTEXITCODE
     $runDuration = ((Get-Date) - $startTime).TotalSeconds
@@ -54,8 +64,7 @@ while ($true) {
     if ($consecutiveQuickFailures -ge 5 -and -not $notificationSent) {
         Write-Host "[run-beedo] $consecutiveQuickFailures consecutive quick failures. Sending notification..."
         $msg = "Beedo is struggling. $consecutiveQuickFailures consecutive startup failures (exit code $exitCode). Still retrying."
-        & "C:\Program Files\nodejs\node.exe" "C:\Users\YAIR\nanoclaw\notify-whatsapp.mjs" $msg `
-            >> "C:\Users\YAIR\nanoclaw\logs\nanoclaw.log" 2>> "C:\Users\YAIR\nanoclaw\logs\nanoclaw.error.log"
+        cmd /c "`"C:\Program Files\nodejs\node.exe`" `"C:\Users\YAIR\nanoclaw\notify-whatsapp.mjs`" `"$msg`" >> `"C:\Users\YAIR\nanoclaw\logs\nanoclaw.log`" 2>> `"C:\Users\YAIR\nanoclaw\logs\nanoclaw.error.log`""
         $notificationSent = $true
     }
 

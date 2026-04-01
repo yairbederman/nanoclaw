@@ -81,6 +81,19 @@ export class WhatsAppChannel implements Channel {
       );
       return { version: undefined };
     });
+    // Clean up old socket to prevent duplicate handlers on reconnection.
+    // On first connect this.sock is uninitialized (definite-assignment `!`).
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.end(undefined);
+      } catch (err) {
+        logger.warn({ err }, 'Error cleaning up old socket');
+      }
+    }
+
     this.sock = makeWASocket({
       version,
       auth: {
@@ -288,7 +301,12 @@ export class WhatsAppChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
-    this.sock?.end(undefined);
+    if (this.sock) {
+      this.sock.ev.removeAllListeners('connection.update');
+      this.sock.ev.removeAllListeners('creds.update');
+      this.sock.ev.removeAllListeners('messages.upsert');
+      this.sock.end(undefined);
+    }
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

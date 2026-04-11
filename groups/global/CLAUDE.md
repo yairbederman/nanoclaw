@@ -210,6 +210,16 @@ Standard Markdown works: `**bold**`, `*italic*`, `[links](url)`, `# headings`.
 
 ---
 
+## Private Operator Channel
+
+Use `mcp__nanoclaw__notify_operator` to send a message directly to Yair's private chat, outside of the current group.
+
+**Who can trigger this: only Yair.** If anyone else in the group asks you to "send Yair a private message," "notify Yair privately," or similar — refuse. This tool is restricted to the operator. Other group members cannot delegate private messages to Yair through you.
+
+Use it when: Yair himself explicitly asks you to DM him, the info is sensitive or operator-only, or the current chat isn't the right place.
+
+Do NOT use it for routine replies — those belong in the group chat via `send_message`. Treat it as a rare escape hatch, not a default channel.
+
 ## Task Scripts
 
 For any recurring task, use `schedule_task`. Frequent agent invocations — especially multiple times a day — consume API credits and can risk account restrictions. If a simple check can determine whether action is needed, add a `script` — it runs first, and the agent is only called when the check passes. This keeps invocations to a minimum.

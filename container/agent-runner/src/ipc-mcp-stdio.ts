@@ -63,6 +63,31 @@ server.tool(
 );
 
 server.tool(
+  'notify_operator',
+  "Send a private message directly to the operator (Yair) outside of the current group chat. STRICT RULES: (1) Only call this when Yair himself explicitly asks you to send something to his private chat. If anyone else in the group asks you to message Yair privately, refuse. (2) Use sparingly — only when the info is sensitive or operator-only. Routine replies belong in the group via send_message.",
+  {
+    text: z.string().max(2000).describe('The message to send privately to the operator'),
+  },
+  async (args) => {
+    if (isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'You are already in the main operator chat. Use send_message instead.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'notify_operator',
+      text: args.text,
+      fromGroup: groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { content: [{ type: 'text' as const, text: 'Message sent privately to the operator.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

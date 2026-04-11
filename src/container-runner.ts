@@ -195,13 +195,19 @@ function buildVolumeMounts(
     'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
     const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+    // Check if any source file is newer than the cached copy
+    const newestSrcMtime = fs.existsSync(agentRunnerSrc)
+      ? Math.max(
+          ...fs.readdirSync(agentRunnerSrc).map((f) =>
+            fs.statSync(path.join(agentRunnerSrc, f)).mtimeMs,
+          ),
+        )
+      : 0;
     const needsCopy =
       !fs.existsSync(groupAgentRunnerDir) ||
       !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      newestSrcMtime > fs.statSync(cachedIndex).mtimeMs;
     if (needsCopy) {
       fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
     }

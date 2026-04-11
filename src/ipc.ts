@@ -11,7 +11,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getMainGroup, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -93,7 +93,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.type === 'notify_operator' && data.text) {
+                // Any group can send a private message to the operator's main chat.
+                // The destination is always the registered main group — the subagent
+                // never needs to know the main JID.
+                const mainGroup = getMainGroup();
+                if (!mainGroup) {
+                  logger.error(
+                    { sourceGroup },
+                    'notify_operator dropped: no main group registered',
+                  );
+                } else {
+                  const prefixed = `[from ${sourceGroup}] ${data.text}`;
+                  await deps.sendMessage(mainGroup.jid, prefixed);
+                  logger.info(
+                    { sourceGroup, length: data.text.length },
+                    'IPC notify_operator forwarded',
+                  );
+                }
+              } else if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (

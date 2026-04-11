@@ -59,6 +59,7 @@ Messages and task operations are verified against group identity:
 |-----------|------------|----------------|
 | Send message to own chat | ✓ | ✓ |
 | Send message to other chats | ✓ | ✗ |
+| Notify operator (main chat only) | ✓ | ✓ |
 | Schedule task for self | ✓ | ✓ |
 | Schedule task for others | ✓ | ✗ |
 | View all tasks | ✓ | Own only |

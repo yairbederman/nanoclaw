@@ -29,7 +29,10 @@ vi.mock('../logger.js', () => ({
 // Mock db
 vi.mock('../db.js', () => ({
   getLastGroupSync: vi.fn(() => null),
+  getLatestMessage: vi.fn(() => undefined),
+  getMessageFromMe: vi.fn(() => false),
   setLastGroupSync: vi.fn(),
+  storeReaction: vi.fn(),
   updateChatName: vi.fn(),
 }));
 
@@ -110,6 +113,7 @@ vi.mock('@whiskeysockets/baileys', () => {
 
 import { WhatsAppChannel, WhatsAppChannelOpts } from './whatsapp.js';
 import { getLastGroupSync, updateChatName, setLastGroupSync } from '../db.js';
+
 // --- Test helpers ---
 
 function createTestOpts(
@@ -172,6 +176,35 @@ describe('WhatsAppChannel', () => {
     triggerConnection('open');
     return p;
   }
+
+  // --- Version fetch ---
+
+  describe('version fetch', () => {
+    it('connects with fetched version', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+      await connectChannel(channel);
+
+      const { fetchLatestWaWebVersion } =
+        await import('@whiskeysockets/baileys');
+      expect(fetchLatestWaWebVersion).toHaveBeenCalledWith({});
+    });
+
+    it('falls back gracefully when version fetch fails', async () => {
+      const { fetchLatestWaWebVersion } =
+        await import('@whiskeysockets/baileys');
+      vi.mocked(fetchLatestWaWebVersion).mockRejectedValueOnce(
+        new Error('network error'),
+      );
+
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+      await connectChannel(channel);
+
+      // Should still connect successfully despite fetch failure
+      expect(channel.isConnected()).toBe(true);
+    });
+  });
 
   // --- Connection lifecycle ---
 
@@ -510,6 +543,32 @@ describe('WhatsAppChannel', () => {
         'registered@g.us',
         expect.objectContaining({ content: 'Watch this' }),
       );
+    });
+
+    it('handles message with no extractable text (e.g. voice note without caption)', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      await connectChannel(channel);
+
+      await triggerMessages([
+        {
+          key: {
+            id: 'msg-8',
+            remoteJid: 'registered@g.us',
+            participant: '5551234@s.whatsapp.net',
+            fromMe: false,
+          },
+          message: {
+            audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true },
+          },
+          pushName: 'Frank',
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ]);
+
+      // Skipped — no text content to process
+      expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
     it('uses sender JID when pushName is absent', async () => {

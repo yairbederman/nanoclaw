@@ -1,42 +1,22 @@
-import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import {
-  DATA_DIR,
-  IPC_POLL_INTERVAL,
-  RESTART_EXIT_CODE,
-  TIMEZONE,
-} from './config.js';
+import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import {
-  createTask,
-  deleteTask,
-  getMainGroup,
-  getTaskById,
-  updateTask,
-} from './db.js';
+import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
-const SCHEDULED_TASKS_DIR = path.join(
-  process.env.USERPROFILE || process.env.HOME || '',
-  '.claude',
-  'scheduled-tasks',
-);
-
-const CLAUDE_CLI = path.join(
-  process.env.USERPROFILE || process.env.HOME || '',
-  '.local',
-  'bin',
-  'claude',
-);
-
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendReaction?: (
+    jid: string,
+    emoji: string,
+    messageId?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -47,10 +27,12 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
-  onTasksChanged: () => void;
+  statusHeartbeat?: () => void;
+  recoverPendingMessages?: () => void;
 }
 
 let ipcWatcherRunning = false;
+const RECOVERY_INTERVAL_MS = 60_000;
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -61,6 +43,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
+  let lastRecoveryTime = Date.now();
 
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
@@ -99,25 +82,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'notify_operator' && data.text) {
-                // Any group can send a private message to the operator's main chat.
-                // The destination is always the registered main group — the subagent
-                // never needs to know the main JID.
-                const mainGroup = getMainGroup();
-                if (!mainGroup) {
-                  logger.error(
-                    { sourceGroup },
-                    'notify_operator dropped: no main group registered',
-                  );
-                } else {
-                  const prefixed = `[from ${sourceGroup}] ${data.text}`;
-                  await deps.sendMessage(mainGroup.jid, prefixed);
-                  logger.info(
-                    { sourceGroup, length: data.text.length },
-                    'IPC notify_operator forwarded',
-                  );
-                }
-              } else if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -133,6 +98,44 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'reaction' &&
+                data.chatJid &&
+                data.emoji &&
+                deps.sendReaction
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  try {
+                    await deps.sendReaction(
+                      data.chatJid,
+                      data.emoji,
+                      data.messageId,
+                    );
+                    logger.info(
+                      { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
+                      'IPC reaction sent',
+                    );
+                  } catch (err) {
+                    logger.error(
+                      {
+                        chatJid: data.chatJid,
+                        emoji: data.emoji,
+                        sourceGroup,
+                        err,
+                      },
+                      'IPC reaction failed',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC reaction attempt blocked',
                   );
                 }
               }
@@ -190,6 +193,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
+    // Status emoji heartbeat — detect dead containers with stale emoji state
+    deps.statusHeartbeat?.();
+
+    // Periodic message recovery — catch stuck messages after retry exhaustion or pipeline stalls
+    const now = Date.now();
+    if (now - lastRecoveryTime >= RECOVERY_INTERVAL_MS) {
+      lastRecoveryTime = now;
+      deps.recoverPendingMessages?.();
+    }
+
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
@@ -205,7 +218,6 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
-    script?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -216,9 +228,6 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For run_task
-    taskName?: string;
-    replyJid?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -284,20 +293,18 @@ export async function processTaskIpc(
           }
           nextRun = new Date(Date.now() + ms).toISOString();
         } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
+          const scheduled = new Date(data.schedule_value);
+          if (isNaN(scheduled.getTime())) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
             );
             break;
           }
-          nextRun = date.toISOString();
+          nextRun = scheduled.toISOString();
         }
 
-        const taskId =
-          data.taskId ||
-          `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const contextMode =
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
@@ -307,7 +314,6 @@ export async function processTaskIpc(
           group_folder: targetFolder,
           chat_jid: targetJid,
           prompt: data.prompt,
-          script: data.script || null,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
@@ -319,7 +325,6 @@ export async function processTaskIpc(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
         );
-        deps.onTasksChanged();
       }
       break;
 
@@ -332,7 +337,6 @@ export async function processTaskIpc(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
           );
-          deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
@@ -351,7 +355,6 @@ export async function processTaskIpc(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
           );
-          deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
@@ -370,79 +373,12 @@ export async function processTaskIpc(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',
           );
-          deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task cancel attempt',
           );
         }
-      }
-      break;
-
-    case 'update_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (!task) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Task not found for update',
-          );
-          break;
-        }
-        if (!isMain && task.group_folder !== sourceGroup) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task update attempt',
-          );
-          break;
-        }
-
-        const updates: Parameters<typeof updateTask>[1] = {};
-        if (data.prompt !== undefined) updates.prompt = data.prompt;
-        if (data.script !== undefined) updates.script = data.script || null;
-        if (data.schedule_type !== undefined)
-          updates.schedule_type = data.schedule_type as
-            | 'cron'
-            | 'interval'
-            | 'once';
-        if (data.schedule_value !== undefined)
-          updates.schedule_value = data.schedule_value;
-
-        // Recompute next_run if schedule changed
-        if (data.schedule_type || data.schedule_value) {
-          const updatedTask = {
-            ...task,
-            ...updates,
-          };
-          if (updatedTask.schedule_type === 'cron') {
-            try {
-              const interval = CronExpressionParser.parse(
-                updatedTask.schedule_value,
-                { tz: TIMEZONE },
-              );
-              updates.next_run = interval.next().toISOString();
-            } catch {
-              logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
-                'Invalid cron in task update',
-              );
-              break;
-            }
-          } else if (updatedTask.schedule_type === 'interval') {
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
-            }
-          }
-        }
-
-        updateTask(data.taskId, updates);
-        logger.info(
-          { taskId: data.taskId, sourceGroup, updates },
-          'Task updated via IPC',
-        );
-        deps.onTasksChanged();
       }
       break;
 
@@ -487,10 +423,7 @@ export async function processTaskIpc(
           );
           break;
         }
-        // Defense in depth: agent cannot set isMain via IPC.
-        // Preserve isMain from the existing registration so IPC config
-        // updates (e.g. adding additionalMounts) don't strip the flag.
-        const existingGroup = registeredGroups[data.jid];
+        // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
@@ -498,7 +431,6 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
-          isMain: existingGroup?.isMain,
         });
       } else {
         logger.warn(
@@ -508,109 +440,7 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'run_task':
-      if (!isMain) {
-        logger.warn({ sourceGroup }, 'Unauthorized run_task attempt blocked');
-        break;
-      }
-      if (!data.taskName || !data.replyJid) {
-        logger.warn({ data }, 'run_task missing taskName or replyJid');
-        break;
-      }
-      runScheduledTask(data.taskName, data.replyJid, deps.sendMessage);
-      break;
-
-    case 'restart':
-      if (!isMain) {
-        logger.warn({ sourceGroup }, 'Unauthorized restart attempt blocked');
-        break;
-      }
-      logger.info({ sourceGroup }, 'Restart requested via IPC, exiting');
-      // Exit with RESTART_EXIT_CODE — non-zero so Windows Task Scheduler
-      // RestartOnFailure kicks in (exit 0 is treated as "success").
-      setTimeout(() => process.exit(RESTART_EXIT_CODE), 1000);
-      break;
-
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
-}
-
-function runScheduledTask(
-  taskName: string,
-  replyJid: string,
-  sendMessage: (jid: string, text: string) => Promise<void>,
-): void {
-  const taskDir = path.join(SCHEDULED_TASKS_DIR, taskName);
-  const skillPath = path.join(taskDir, 'SKILL.md');
-
-  if (!fs.existsSync(skillPath)) {
-    const available = fs.existsSync(SCHEDULED_TASKS_DIR)
-      ? fs.readdirSync(SCHEDULED_TASKS_DIR).join(', ')
-      : 'none';
-    sendMessage(
-      replyJid,
-      `Task "${taskName}" not found. Available: ${available}`,
-    ).catch(() => {});
-    return;
-  }
-
-  const raw = fs.readFileSync(skillPath, 'utf-8');
-
-  // Parse cwd from frontmatter before stripping (e.g. "cwd: C:/Projects/Foo")
-  let taskCwd = process.cwd();
-  const cwdMatch = raw.match(/^---[\r\n][\s\S]*?[\r\n]---/);
-  if (cwdMatch) {
-    const cwdField = cwdMatch[0].match(/^cwd:\s*(.+)$/m);
-    if (cwdField) {
-      const resolved = path.resolve(cwdField[1].trim());
-      if (fs.existsSync(resolved)) {
-        taskCwd = resolved;
-      } else {
-        logger.warn(
-          { taskName, cwd: cwdField[1] },
-          'Task cwd does not exist, using default',
-        );
-      }
-    }
-  }
-
-  // Strip ALL leading YAML frontmatter blocks — the leading '---' confuses
-  // the CLI arg parser into treating the prompt as an unknown option flag.
-  let prompt = raw;
-  while (prompt.startsWith('---\n') || prompt.startsWith('---\r\n')) {
-    prompt = prompt.replace(/^---[\r\n][\s\S]*?[\r\n]---[\r\n]*/, '');
-  }
-  logger.info({ taskName, cwd: taskCwd }, 'Running scheduled task via CLI');
-  sendMessage(
-    replyJid,
-    `Running *${taskName}*... I'll update you when done.`,
-  ).catch(() => {});
-
-  const proc = spawn(
-    CLAUDE_CLI,
-    ['--print', '--dangerously-skip-permissions', '-p', prompt],
-    {
-      cwd: taskCwd,
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-
-  let output = '';
-  proc.stdout.on('data', (d: Buffer) => {
-    output += d.toString();
-  });
-  proc.stderr.on('data', (d: Buffer) => {
-    output += d.toString();
-  });
-
-  proc.on('close', (code: number) => {
-    const summary = output.slice(-1000).trim() || '(no output)';
-    const status = code === 0 ? '✅ Done' : `❌ Failed (exit ${code})`;
-    sendMessage(replyJid, `${status}: *${taskName}*\n\n${summary}`).catch(
-      () => {},
-    );
-    logger.info({ taskName, code }, 'Scheduled task finished');
-  });
 }

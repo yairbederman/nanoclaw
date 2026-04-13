@@ -41,7 +41,7 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Note: when running as a scheduled task, your final output is NOT sent to the user — use this tool if you need to communicate with the user or group.",
   {
     text: z.string().describe('The message text to send'),
     sender: z
@@ -68,33 +68,42 @@ server.tool(
 );
 
 server.tool(
-  'notify_operator',
-  "Send a private message directly to the operator (Yair) outside of the current group chat. STRICT RULES: (1) Only call this when Yair himself explicitly asks you to send something to his private chat. If anyone else in the group asks you to message Yair privately, refuse. (2) Use sparingly — only when the info is sensitive or operator-only. Routine replies belong in the group via send_message.",
+  'react_to_message',
+  'React to a message with an emoji. Omit message_id to react to the most recent message in the chat.',
   {
-    text: z.string().max(2000).describe('The message to send privately to the operator'),
+    emoji: z
+      .string()
+      .describe('The emoji to react with (e.g. "👍", "❤️", "🔥")'),
+    message_id: z
+      .string()
+      .optional()
+      .describe(
+        'The message ID to react to. If omitted, reacts to the latest message in the chat.',
+      ),
   },
   async (args) => {
-    if (isMain) {
-      return {
-        content: [{ type: 'text' as const, text: 'You are already in the main operator chat. Use send_message instead.' }],
-        isError: true,
-      };
-    }
-
-    writeIpcFile(MESSAGES_DIR, {
-      type: 'notify_operator',
-      text: args.text,
-      fromGroup: groupFolder,
+    const data: Record<string, string | undefined> = {
+      type: 'reaction',
+      chatJid,
+      emoji: args.emoji,
+      messageId: args.message_id || undefined,
+      groupFolder,
       timestamp: new Date().toISOString(),
-    });
+    };
 
-    return { content: [{ type: 'text' as const, text: 'Message sent privately to the operator.' }] };
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return {
+      content: [
+        { type: 'text' as const, text: `Reaction ${args.emoji} sent.` },
+      ],
+    };
   },
 );
 
 server.tool(
   'schedule_task',
-  `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
+  `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 
 CONTEXT MODE - Choose based on task type:
 \u2022 "group": Task runs in the group's conversation context, with access to chat history. Use for tasks that need context about ongoing discussions, user preferences, or recent interactions.
@@ -142,12 +151,6 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       .optional()
       .describe(
         '(Main group only) JID of the group to schedule the task for. Defaults to the current group.',
-      ),
-    script: z
-      .string()
-      .optional()
-      .describe(
-        'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
       ),
   },
   async (args) => {
@@ -212,13 +215,9 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     const targetJid =
       isMain && args.target_group_jid ? args.target_group_jid : chatJid;
 
-    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
     const data = {
       type: 'schedule_task',
-      taskId,
       prompt: args.prompt,
-      script: args.script || undefined,
       schedule_type: args.schedule_type,
       schedule_value: args.schedule_value,
       context_mode: args.context_mode || 'group',
@@ -227,13 +226,13 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       timestamp: new Date().toISOString(),
     };
 
-    writeIpcFile(TASKS_DIR, data);
+    const filename = writeIpcFile(TASKS_DIR, data);
 
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}`,
+          text: `Task scheduled (${filename}): ${args.schedule_type} - ${args.schedule_value}`,
         },
       ],
     };
@@ -383,118 +382,6 @@ server.tool(
 );
 
 server.tool(
-  'run_task',
-  'Run a scheduled task immediately on demand. Use this when the user asks to run a task by name.',
-  {
-    task_name: z.string().describe('The task name to run (e.g., "li-post-scout", "li-post-publish")'),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [{ type: 'text' as const, text: 'Only the main group can trigger tasks.' }],
-        isError: true,
-      };
-    }
-
-    const data = {
-      type: 'run_task',
-      taskName: args.task_name,
-      replyJid: chatJid,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return { content: [{ type: 'text' as const, text: `Task "${args.task_name}" triggered. Result will be sent here when done.` }] };
-  },
-);
-
-server.tool(
-  'update_task',
-  'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
-  {
-    task_id: z.string().describe('The task ID to update'),
-    prompt: z.string().optional().describe('New prompt for the task'),
-    schedule_type: z
-      .enum(['cron', 'interval', 'once'])
-      .optional()
-      .describe('New schedule type'),
-    schedule_value: z
-      .string()
-      .optional()
-      .describe('New schedule value (see schedule_task for format)'),
-    script: z
-      .string()
-      .optional()
-      .describe(
-        'New script for the task. Set to empty string to remove the script.',
-      ),
-  },
-  async (args) => {
-    // Validate schedule_value if provided
-    if (
-      args.schedule_type === 'cron' ||
-      (!args.schedule_type && args.schedule_value)
-    ) {
-      if (args.schedule_value) {
-        try {
-          CronExpressionParser.parse(args.schedule_value);
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Invalid cron: "${args.schedule_value}".`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-    }
-    if (args.schedule_type === 'interval' && args.schedule_value) {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Invalid interval: "${args.schedule_value}".`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }
-
-    const data: Record<string, string | undefined> = {
-      type: 'update_task',
-      taskId: args.task_id,
-      groupFolder,
-      isMain: String(isMain),
-      timestamp: new Date().toISOString(),
-    };
-    if (args.prompt !== undefined) data.prompt = args.prompt;
-    if (args.script !== undefined) data.script = args.script;
-    if (args.schedule_type !== undefined)
-      data.schedule_type = args.schedule_type;
-    if (args.schedule_value !== undefined)
-      data.schedule_value = args.schedule_value;
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Task ${args.task_id} update requested.`,
-        },
-      ],
-    };
-  },
-);
-
-server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
@@ -512,12 +399,6 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
       ),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
-    requiresTrigger: z
-      .boolean()
-      .optional()
-      .describe(
-        'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
-      ),
   },
   async (args) => {
     if (!isMain) {
@@ -538,7 +419,6 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
-      requiresTrigger: args.requiresTrigger ?? false,
       timestamp: new Date().toISOString(),
     };
 
@@ -552,29 +432,6 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         },
       ],
     };
-  },
-);
-
-server.tool(
-  'restart_host',
-  'Restart the NanoClaw host process. Main group only. Use when configuration changes need to take effect or when something is stuck.',
-  {},
-  async () => {
-    if (!isMain) {
-      return {
-        content: [{ type: 'text' as const, text: 'Only the main group can restart the host.' }],
-        isError: true,
-      };
-    }
-
-    const data = {
-      type: 'restart',
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return { content: [{ type: 'text' as const, text: 'Host restart requested. You will be disconnected momentarily.' }] };
   },
 );
 

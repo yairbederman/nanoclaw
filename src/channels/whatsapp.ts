@@ -2,8 +2,6 @@ import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { RESTART_EXIT_CODE } from '../config.js';
-
 import makeWASocket, {
   Browsers,
   DisconnectReason,
@@ -16,10 +14,10 @@ import makeWASocket, {
 import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
+  RESTART_EXIT_CODE,
   STORE_DIR,
-  getTriggerPattern,
 } from '../config.js';
-import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
+import { getLastGroupSync, getLatestMessage, setLastGroupSync, storeReaction, updateChatName } from '../db.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -27,16 +25,6 @@ import {
   OnChatMetadata,
   RegisteredGroup,
 } from '../types.js';
-import { registerChannel, ChannelOpts } from './registry.js';
-
-// Baileys expects a pino-compatible ILogger; shim the built-in logger
-const baileysLogger = {
-  ...logger,
-  level: 'warn' as string,
-  trace: (dataOrMsg: Record<string, unknown> | string, msg?: string) =>
-    logger.debug(dataOrMsg as string, msg),
-  child: () => baileysLogger,
-};
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -81,27 +69,14 @@ export class WhatsAppChannel implements Channel {
       );
       return { version: undefined };
     });
-    // Clean up old socket to prevent duplicate handlers on reconnection.
-    // On first connect this.sock is uninitialized (definite-assignment `!`).
-    if (this.sock) {
-      try {
-        this.sock.ev.removeAllListeners('connection.update');
-        this.sock.ev.removeAllListeners('creds.update');
-        this.sock.ev.removeAllListeners('messages.upsert');
-        this.sock.end(undefined);
-      } catch (err) {
-        logger.warn({ err }, 'Error cleaning up old socket');
-      }
-    }
-
     this.sock = makeWASocket({
       version,
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       printQRInTerminal: false,
-      logger: baileysLogger,
+      logger,
       browser: Browsers.macOS('Chrome'),
     });
 
@@ -231,9 +206,6 @@ export class WhatsAppChannel implements Channel {
           // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
           if (!content) continue;
 
-          const group = groups[chatJid];
-          const isMain = group.isMain === true;
-
           const sender = msg.key.participant || msg.key.remoteJid || '';
           const senderName = msg.pushName || sender.split('@')[0];
 
@@ -251,11 +223,50 @@ export class WhatsAppChannel implements Channel {
             chat_jid: chatJid,
             sender,
             sender_name: senderName,
-            content: content,
+            content,
             timestamp,
             is_from_me: fromMe,
             is_bot_message: isBotMessage,
           });
+        }
+      }
+    });
+
+    // Listen for message reactions
+    this.sock.ev.on('messages.reaction', async (reactions) => {
+      for (const { key, reaction } of reactions) {
+        try {
+          const messageId = key.id;
+          if (!messageId) continue;
+          const rawChatJid = key.remoteJid;
+          if (!rawChatJid || rawChatJid === 'status@broadcast') continue;
+          const chatJid = await this.translateJid(rawChatJid);
+          const groups = this.opts.registeredGroups();
+          if (!groups[chatJid]) continue;
+          const reactorJid = reaction.key?.participant || reaction.key?.remoteJid || '';
+          const emoji = reaction.text || '';
+          const timestamp = reaction.senderTimestampMs
+            ? new Date(Number(reaction.senderTimestampMs)).toISOString()
+            : new Date().toISOString();
+          storeReaction({
+            message_id: messageId,
+            message_chat_jid: chatJid,
+            reactor_jid: reactorJid,
+            reactor_name: reactorJid.split('@')[0],
+            emoji,
+            timestamp,
+          });
+          logger.info(
+            {
+              chatJid,
+              messageId: messageId.slice(0, 10) + '...',
+              reactor: reactorJid.split('@')[0],
+              emoji: emoji || '(removed)',
+            },
+            emoji ? 'Reaction added' : 'Reaction removed'
+          );
+        } catch (err) {
+          logger.error({ err }, 'Failed to process reaction');
         }
       }
     });
@@ -291,6 +302,46 @@ export class WhatsAppChannel implements Channel {
     }
   }
 
+  async sendReaction(
+    chatJid: string,
+    messageKey: { id: string; remoteJid: string; fromMe?: boolean; participant?: string },
+    emoji: string
+  ): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ chatJid, emoji }, 'Cannot send reaction - not connected');
+      throw new Error('Not connected to WhatsApp');
+    }
+    try {
+      await this.sock.sendMessage(chatJid, {
+        react: { text: emoji, key: messageKey },
+      });
+      logger.info(
+        {
+          chatJid,
+          messageId: messageKey.id?.slice(0, 10) + '...',
+          emoji: emoji || '(removed)',
+        },
+        emoji ? 'Reaction sent' : 'Reaction removed'
+      );
+    } catch (err) {
+      logger.error({ chatJid, emoji, err }, 'Failed to send reaction');
+      throw err;
+    }
+  }
+
+  async reactToLatestMessage(chatJid: string, emoji: string): Promise<void> {
+    const latest = getLatestMessage(chatJid);
+    if (!latest) {
+      throw new Error(`No messages found for chat ${chatJid}`);
+    }
+    const messageKey = {
+      id: latest.id,
+      remoteJid: chatJid,
+      fromMe: latest.fromMe,
+    };
+    await this.sendReaction(chatJid, messageKey, emoji);
+  }
+
   isConnected(): boolean {
     return this.connected;
   }
@@ -301,12 +352,7 @@ export class WhatsAppChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
-    if (this.sock) {
-      this.sock.ev.removeAllListeners('connection.update');
-      this.sock.ev.removeAllListeners('creds.update');
-      this.sock.ev.removeAllListeners('messages.upsert');
-      this.sock.end(undefined);
-    }
+    this.sock?.end(undefined);
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
@@ -410,14 +456,3 @@ export class WhatsAppChannel implements Channel {
     }
   }
 }
-
-registerChannel('whatsapp', (opts: ChannelOpts) => {
-  const authDir = path.join(STORE_DIR, 'auth');
-  if (!fs.existsSync(path.join(authDir, 'creds.json'))) {
-    logger.warn(
-      'WhatsApp: credentials not found. Run /add-whatsapp to authenticate.',
-    );
-    return null;
-  }
-  return new WhatsAppChannel(opts);
-});

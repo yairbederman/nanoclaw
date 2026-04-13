@@ -14,6 +14,11 @@ import {
 
 let db: Database.Database;
 
+/** Close the database connection (for testing cleanup). */
+export function _closeDatabase(): void {
+  if (db) db.close();
+}
+
 export interface Reaction {
   message_id: string;
   message_chat_jid: string;

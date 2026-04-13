@@ -37,12 +37,7 @@ function detectHostGateway(): string {
  * but the proxy must start before any container.
  * The /convert-to-apple-container skill sets this during setup.
  */
-export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST;
-if (!PROXY_BIND_HOST) {
-  throw new Error(
-    'CREDENTIAL_PROXY_HOST is not set in .env. Run /convert-to-apple-container to configure.',
-  );
-}
+export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST || '127.0.0.1';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {

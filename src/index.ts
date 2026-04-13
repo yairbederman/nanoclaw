@@ -43,6 +43,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { PROXY_BIND_HOST } from './container-runtime.js';
 import { removePidFile, writePidFile } from './pid.js';
 import {
   restoreRemoteControl,
@@ -490,6 +491,7 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  writePidFile();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
@@ -500,6 +502,7 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
+    removePidFile();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -593,6 +596,11 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
   });
+  startSessionCleanup();
+  await startCredentialProxy(
+    (await import('./config.js')).CREDENTIAL_PROXY_PORT,
+    PROXY_BIND_HOST,
+  );
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

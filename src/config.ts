@@ -5,8 +5,6 @@ import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
@@ -19,8 +17,6 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
-export const OLLAMA_ADMIN_TOOLS =
-  (process.env.OLLAMA_ADMIN_TOOLS || envConfig.OLLAMA_ADMIN_TOOLS) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -59,6 +55,8 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || '3001',
   10,
 );
+export const OLLAMA_ADMIN_TOOLS =
+  (process.env.OLLAMA_ADMIN_TOOLS || envConfig.OLLAMA_ADMIN_TOOLS) === 'true';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
@@ -68,10 +66,6 @@ export const IPC_POLL_INTERVAL = 1000;
  *  Distinct from 1 (crash) and 0 (intentional stop). */
 export const RESTART_EXIT_CODE = 75;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
-/** How often the watchdog checks the message loop heartbeat (ms). */
-export const HEARTBEAT_CHECK_INTERVAL = 60_000; // 60s
-/** Max time since last heartbeat before the watchdog triggers a restart (ms). */
-export const HEARTBEAT_STALE_THRESHOLD = 300_000; // 5min
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,

@@ -21,7 +21,6 @@ import {
   STORE_DIR,
 } from '../config.js';
 import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
-import { isImageMessage, processImage } from '../image.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -67,7 +66,6 @@ export class WhatsAppChannel implements Channel {
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    // Baileys expects a pino-compatible logger with level/child/trace
     const waLogger = {
       ...logger,
       level: 'warn' as const,
@@ -122,7 +120,15 @@ export class WhatsAppChannel implements Channel {
         );
 
         if (shouldReconnect) {
-          this.scheduleReconnect(1);
+          logger.info('Reconnecting...');
+          this.connectInternal().catch((err) => {
+            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
+            setTimeout(() => {
+              this.connectInternal().catch((err2) => {
+                logger.error({ err: err2 }, 'Reconnection retry failed');
+              });
+            }, 5000);
+          });
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(RESTART_EXIT_CODE);
@@ -214,18 +220,32 @@ export class WhatsAppChannel implements Channel {
               normalized.videoMessage?.caption ||
               '';
 
-            // Image attachment handling
-            if (isImageMessage(msg)) {
+            // PDF attachment handling
+            if (normalized?.documentMessage?.mimetype === 'application/pdf') {
               try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
                 const groupDir = path.join(GROUPS_DIR, groups[chatJid].folder);
-                const caption = normalized?.imageMessage?.caption ?? '';
-                const result = await processImage(buffer as Buffer, groupDir, caption);
-                if (result) {
-                  content = result.content;
-                }
+                const attachDir = path.join(groupDir, 'attachments');
+                fs.mkdirSync(attachDir, { recursive: true });
+                const filename = path.basename(
+                  normalized.documentMessage.fileName ||
+                  `doc-${Date.now()}.pdf`,
+                );
+                const filePath = path.join(attachDir, filename);
+                fs.writeFileSync(filePath, buffer as Buffer);
+                const sizeKB = Math.round((buffer as Buffer).length / 1024);
+                const pdfRef = `[PDF: attachments/${filename} (${sizeKB}KB)]\nUse: pdf-reader extract attachments/${filename}`;
+                const caption = normalized.documentMessage.caption || '';
+                content = caption ? `${caption}\n\n${pdfRef}` : pdfRef;
+                logger.info(
+                  { jid: chatJid, filename },
+                  'Downloaded PDF attachment',
+                );
               } catch (err) {
-                logger.warn({ err, jid: chatJid }, 'Image - download failed');
+                logger.warn(
+                  { err, jid: chatJid },
+                  'Failed to download PDF attachment',
+                );
               }
             }
 
@@ -356,17 +376,6 @@ export class WhatsAppChannel implements Channel {
     } catch (err) {
       logger.error({ err }, 'Failed to sync group metadata');
     }
-  }
-
-  private scheduleReconnect(attempt: number): void {
-    const delayMs = Math.min(5000 * Math.pow(2, attempt - 1), 300000);
-    logger.info({ attempt, delayMs }, 'Reconnecting...');
-    setTimeout(() => {
-      this.connectInternal().catch((err) => {
-        logger.error({ err, attempt }, 'Reconnection attempt failed');
-        this.scheduleReconnect(attempt + 1);
-      });
-    }, delayMs);
   }
 
   private async translateJid(jid: string): Promise<string> {

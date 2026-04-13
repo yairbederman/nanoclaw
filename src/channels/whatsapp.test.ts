@@ -8,10 +8,11 @@ vi.mock('../config.js', () => ({
   STORE_DIR: '/tmp/nanoclaw-test-store',
   ASSISTANT_NAME: 'Andy',
   ASSISTANT_HAS_OWN_NUMBER: false,
+  RESTART_EXIT_CODE: 75,
   getTriggerPattern: (trigger?: string) => {
     const t = trigger?.trim() || '@Andy';
     const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${escaped}\\b`, 'i');
+    return new RegExp(`${escaped}\\b`, 'i');
   },
 }));
 
@@ -292,7 +293,7 @@ describe('WhatsAppChannel', () => {
       triggerDisconnect(401);
 
       expect(channel.isConnected()).toBe(false);
-      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockExit).toHaveBeenCalledWith(75);
       mockExit.mockRestore();
     });
 

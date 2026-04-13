@@ -218,9 +218,9 @@ function buildVolumeMounts(
     // Check if any source file is newer than the cached copy
     const newestSrcMtime = fs.existsSync(agentRunnerSrc)
       ? Math.max(
-          ...fs.readdirSync(agentRunnerSrc).map((f) =>
-            fs.statSync(path.join(agentRunnerSrc, f)).mtimeMs,
-          ),
+          ...fs
+            .readdirSync(agentRunnerSrc)
+            .map((f) => fs.statSync(path.join(agentRunnerSrc, f)).mtimeMs),
         )
       : 0;
     const needsCopy =

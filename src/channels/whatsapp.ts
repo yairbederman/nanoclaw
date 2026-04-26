@@ -535,9 +535,7 @@ registerChannelAdapter('whatsapp', {
             // talk to the bot from their personal WhatsApp. Block fromMe in all
             // other chats to prevent echo loops on the bot's own outbound messages.
             if (fromMe) {
-              const ownPhoneJid = sock.user?.id
-                ? sock.user.id.split(':')[0] + '@s.whatsapp.net'
-                : null;
+              const ownPhoneJid = sock.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : null;
               if (chatJid !== ownPhoneJid) continue;
               // Skip echoes of our own outbound messages (bot replies coming back)
               if (msg.key.id && sentMessageCache.has(msg.key.id)) continue;
